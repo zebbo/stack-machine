@@ -37,7 +37,7 @@ emulate st@(State ps pc bp sp codelen mem) input output tracing = do
     else do 
         let ir = toEnum (mem!!pc)
         when tracing (trace st)
-        when (ir `elem` [Prs, Stk, Prn]) (executeIO st ir)
+        when (ir `elem` [Prs, Stk, Prn, Nln]) (executeIO st ir)
         let st'@(State ps' _ _ _ _ _) = execute st $ ir
         case ps' of Running -> emulate st' input output tracing
                     Finished -> return ()
