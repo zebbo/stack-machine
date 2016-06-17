@@ -1,5 +1,6 @@
 module StackMachine3
 ( Opcode (..)
+, multiByteInstructions
 , initState
 , emulate
 )
@@ -11,7 +12,9 @@ data SMState = SMState {ir :: Opcode, ps :: ProgramState, pc :: Int, bp :: Int, 
 data Opcode = Adr | Lit | Dsp | Brn | Bze | Prs | Add
             | Sub | Mul | Dvd | Eql | Neq | Lss | Geq
             | Gtr | Leq | Neg | Val | Sto | Ind | Stk
-            | Hlt | Inn | Prn | Nln | Nop | Nul deriving (Show, Eq, Enum, Bounded, Ord)
+            | Hlt | Inn | Prn | Nln | Nop | Nul deriving (Show, Eq, Enum, Bounded, Ord, Read)
+
+multiByteInstructions = [Adr, Lit, Dsp, Brn, Bze]
 
 data ProgramState = Running | Finished | Badmem | Baddata | Nodata | Divzero | Badop | Badind deriving (Eq, Enum, Show)
 
