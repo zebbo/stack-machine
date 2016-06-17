@@ -1,201 +1,213 @@
 module StackMachine
 ( Opcode (..)
+, multiByteInstructions
+, memSize
 , initState
 , emulate
-) where
+)
+where
+import Control.Monad (foldM_, when)
 
-import Control.Monad
+data SMState = SMState {ir :: Opcode, ps :: ProgramState, pc :: Int, bp :: Int, sp :: Int, codelen :: Int, mem :: [Int]} deriving (Show)
 
-data State = State {ps :: ProgramState, pc :: Int, bp :: Int, sp :: Int, codelen :: Int, mem :: [Int]}
-
-data Opcode = Adr | Lit | Dsp | Brn | Bze | Prs | Add 
-            | Sub | Mul | Dvd | Eql | Neq | Lss | Geq 
+data Opcode = Adr | Lit | Dsp | Brn | Bze | Prs | Add
+            | Sub | Mul | Dvd | Eql | Neq | Lss | Geq
             | Gtr | Leq | Neg | Val | Sto | Ind | Stk
-            | Hlt | Inn | Prn | Nln | Nop | Nul deriving (Show, Eq, Enum, Bounded)
+            | Hlt | Inn | Prn | Nln | Nop | Nul deriving (Show, Eq, Enum, Bounded, Ord, Read)
 
-data ProgramState = Running | Finished | Badmem | Baddata | Nodata | Divzero | Badop | Badind deriving (Eq, Enum)
+multiByteInstructions = [Adr, Lit, Dsp, Brn, Bze]
+memSize = 256 :: Int
 
-instance Show ProgramState where
-    show Running = "Running"
-    show Finished = "Finished"
-    show Badmem = "Memory violation"
-    show Baddata = "Invalid data"
-    show Nodata = "No more data"
-    show Divzero = "Division by zero"
-    show Badop = "Illegal opcode"
-    show Badind = "Subscript out of range"
+data ProgramState = Running | Finished | Badmem | Baddata | Nodata | Divzero | Badop | Badind deriving (Eq, Enum, Show)
 
---memSize = 512
+initState :: Int -> Int -> Int -> [Int] -> SMState
+initState initpc initbp cl initmem = SMState { ir = Nop, ps = Running, pc = initpc, bp = initbp, sp = initbp, codelen = cl, mem = initmem }
 
-initState :: Int -> Int -> Int -> [Int] -> State
-initState initpc initbp cl initmem = State { ps = Running, pc = initpc, bp = initbp, sp = initbp, codelen = cl, mem = initmem }
+emulate :: SMState -> IO String -> (String -> IO ()) -> Bool -> IO()
+emulate st input output tracing = do
+    let stf = fetch st
+    inp <- preExecIO stf input output tracing
+    let stx = stf >>= execute inp
+    postExecIO stx output
+    case stx of Right newst -> emulate newst input output tracing
+                Left  newst -> handleDead newst output
 
-emulate :: State -> IO String -> (String -> IO ()) -> Bool -> IO ()
-emulate st@(State ps pc bp sp codelen mem) input output tracing = do
-    if (mem!!pc > fromEnum Nul) 
-    then do when tracing (trace st); handleError (State Badop pc bp sp codelen mem)
-    else do 
-        let ir = toEnum (mem!!pc)
-        when tracing (trace st)
-        when (ir `elem` [Prs, Stk, Prn, Nln]) (executeIO st ir)
-        let st'@(State ps' _ _ _ _ _) = execute st $ ir
-        case ps' of Running -> emulate st' input output tracing
-                    Finished -> return ()
-                    _ -> handleError st'    
+-- dry run, maybe useful for testing
+--run :: SMState -> Either SMState SMState
+--run st = return st >>= fetch >>= execute >>= run
 
-execute :: State -> Opcode -> State
-execute st@(State ps pc bp sp codelen mem) ir
-    | ir == Adr = if inbounds (sp-1) st 
-                  then State ps (pc+2) bp (sp-1) codelen (setMem (sp-1,bp+mem!!(pc+1)) mem)
-                  else State Badmem pc bp (sp-1) codelen mem 
-    | ir == Lit = if inbounds (sp-1) st
-                  then State ps (pc+2) bp (sp-1) codelen (setMem (sp-1,mem!!(pc+1)) mem)
-                  else State Badmem pc bp (sp-1) codelen mem
-    | ir == Dsp = if inbounds (sp-(mem!!(pc+1))) st
-                  then State ps (pc+2) bp (sp-(mem!!(pc+1))) codelen mem
-                  else State Badmem pc bp (sp-(mem!!(pc+1))) codelen mem
-    | ir == Brn = State ps (mem!!(pc+1)) bp sp codelen mem
-    | ir == Bze = if inbounds (sp+1) st
-                  then if tos == 0 
-                       then State ps (mem!!(pc+1)) bp (sp+1) codelen (setMem (sp,0) mem)
-                       else State ps (pc+2) bp (sp+1) codelen (setMem (sp,0) mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Prs = State ps (pc+2) bp sp codelen mem
-    | ir == Add = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, sos + tos) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Sub = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, sos - tos) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Mul = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, sos * tos) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Dvd = if tos == 0
-                  then State Divzero pc bp sp codelen mem
-                  else if inbounds (sp+1) st
-                       then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, sos `div` tos) $ mem)
-                       else State Badmem pc bp (sp+1) codelen mem
-    | ir == Eql = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos == tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Neq = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos /= tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Lss = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos < tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Gtr = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos > tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Leq = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos <= tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Geq = if inbounds (sp+1) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+1) codelen (setMem (sp, 0) . setMem (sp+1, if sos >= tos then 1 else 0) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Neg = State ps (pc+1) bp sp codelen (setMem (sp,-tos) mem)
-    | ir == Val = if inbounds sp st && inbounds tos st
-                  then State ps (pc+1) bp sp codelen (setMem (sp,mem!!tos) mem)
-                  else State Badmem pc bp sp codelen mem
-    | ir == Sto = if inbounds (sp+1) st && inbounds (mem!!(sp+1)) st
-                  then let sos = mem!!(sp+1) in State ps (pc+1) bp (sp+2) codelen (setMem (sp, 0) . setMem(sp+1,0) . setMem(sos,tos) $ mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Ind = if inbounds (sp+2) st
-                  then let size = mem!!sp 
-                           tos' = mem!!(sp+1) 
-                           sos' = mem!!(sp+2) 
-                       in if tos' `elem` [0..size-1]
-                          then State ps (pc+1) bp sp codelen (setMem (sp,0) . setMem (sp+1,0) . setMem (sp+2,sos'-tos') $ mem)
-                          else State Badind pc bp sp codelen mem
-                  else State Badmem pc bp (sp+2) codelen mem
-    | ir == Stk = State ps (pc+1) bp sp codelen mem
-    | ir == Hlt = State Finished pc bp sp codelen mem
-    | ir == Inn = if inbounds (tos) st 
-                  then State ps (pc+1) bp (sp+1) codelen (setMem (sp,0) . setMem (tos,1) $ mem) -- TODO: Acutally read int
-                  else State Badmem pc bp sp codelen mem
-    | ir == Prn = if inbounds (sp+1) st
-                  then State ps (pc+1) bp (sp+1) codelen (setMem (sp,0) mem)
-                  else State Badmem pc bp (sp+1) codelen mem
-    | ir == Nln = State ps (pc+1) bp sp codelen mem
-    | ir == Nop = State ps (pc+1) bp sp codelen mem
-    | ir == Nul = State Badop pc bp sp codelen mem
-    | otherwise = State Badop pc bp sp codelen mem
-    where tos = mem!!sp
+fetch :: SMState -> Either SMState SMState
+fetch (SMState ir ps pc bp sp codelen mem)
+    | pc < codelen && opNum `elem` opNumRange = Right (SMState (toEnum opNum) ps (pc+1) bp sp codelen mem)
+    | otherwise = Left (SMState ir Badop pc bp sp codelen mem)
+    where opNum = mem!!pc
+          opNumRange = map fromEnum ([minBound..maxBound] :: [Opcode])
 
-executeIO :: State -> Opcode -> IO ()
-executeIO st@(State ps pc bp sp codelen mem) ir
-    | ir == Prs = execPrs (mem!!(pc+1)) mem
-    | ir == Stk = stackdump st
-    | ir == Prn = putStr $ show tos
-    | ir == Nln = putStr "\n"
-    where tos = mem!!sp
+execute :: Int -> SMState -> Either SMState SMState
+execute input st@(SMState ir ps pc bp sp codelen mem) 
+    | ir == Adr = return st >>= inbounds (sp-1) >>= push (bp+mem!!(pc)) >>= incPC
+    | ir == Lit = return st >>= inbounds (sp-1) >>= push (mem!!pc) >>= incPC
+    | ir == Dsp = return st >>= inbounds (sp-mem!!pc) >>= decSP (mem!!pc) >>= incPC
+    | ir == Brn = return st >>= setPC (mem!!pc)
+    | ir == Bze = return st >>= inbounds (sp+1) >> let (val, newst) = pop st in return newst >>= if val == 0 then setPC (mem!!pc) else incPC
+    | ir == Prs = return st >>= incPC
+    | ir == Add = return st >>= inbounds (sp+1) >> let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (sos+tos)
+    | ir == Sub = return st >>= inbounds (sp+1) >> let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (sos-tos)
+    | ir == Mul = return st >>= inbounds (sp+1) >> let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (sos*tos)
+    | ir == Dvd = let (tos, stack') = pop st in return stack' >>= nonZero tos >>= inbounds (sp+1) >> 
+                    let (sos, stack'') = pop stack' in return stack'' >>= push (sos `div` tos)
+    | ir == Eql = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos==tos then 1 else 0)
+    | ir == Neq = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos/=tos then 1 else 0)
+    | ir == Lss = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos<tos then 1 else 0)
+    | ir == Gtr = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos>tos then 1 else 0)
+    | ir == Leq = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos<=tos then 1 else 0)
+    | ir == Geq = return st >>= inbounds (sp+1) >> 
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= push (if sos>=tos then 1 else 0)
+    | ir == Neg = let (tos, stack') = pop st in return stack' >>= push (-tos)
+    | ir == Val = return st >>= inbounds sp >>
+                    let (tos, stack') = pop st in return stack' >>= inbounds tos >>= push (mem!!tos)
+    | ir == Sto = return st >>= inbounds (sp+1) >>= inbounds (mem!!(sp+1)) >>
+                    let (tos, stack') = pop st; (sos, stack'') = pop stack' in return stack'' >>= alterMem (sos, tos)
+    | ir == Ind = return st >>= inbounds (sp+2) >>
+                    let (size, stack') = pop st; (idx, stack'') = pop stack'; (offset, stack''') = pop stack'' in 
+                        return stack''' >>= validIdx idx size >>= push (offset-idx)
+    | ir == Stk = return st
+    | ir == Hlt = Left (SMState ir Finished pc bp sp codelen mem)
+    | ir == Inn = let (val, newst) = pop st in return newst >>= alterMem (val,input)
+    | ir == Prn = return st >>= inbounds (sp+1)
+    | ir == Nln = return st
+    | ir == Nul = Left (SMState ir Badop pc bp sp codelen mem)
+    | otherwise = Left st
 
-handleError :: State -> IO ()
-handleError (State ps pc _ _ _ _) = putStrLn $ "ERROR: " ++ show ps ++ " at: " ++ show pc
+preExecIO :: Either SMState SMState -> IO String -> (String -> IO()) -> Bool -> IO Int
+preExecIO st input output tracing = do when tracing (trace st output); preExecOutput st output; preExecInput st input
 
-inbounds :: Int -> State -> Bool
-inbounds p (State ps pc bp sp codelen mem) = p < length mem && p >= codelen
+preExecInput :: Either SMState SMState -> IO String -> IO Int
+preExecInput (Right (SMState Inn _ _ _ _ _ _)) inp = do l <- inp; return (read l)
+preExecInput _ _ = return 0
 
-execPrs :: Int -> [Int] -> IO ()
-execPrs add mem = when (mem!!add /= 0) (do putChar (toEnum $ mem!!add :: Char); execPrs (add-1) mem;)
+preExecOutput :: Either SMState SMState -> (String -> IO()) -> IO ()
+preExecOutput (Right (SMState Prs _ pc _ _ _ mem)) output = output $ execPrs (mem!!pc) mem
+preExecOutput _ _ = return ()
+
+postExecIO :: Either SMState SMState -> (String -> IO()) -> IO ()
+postExecIO (Right st@(SMState ir ps pc bp sp codelen mem)) output
+    | ir == Stk = stackdump st output
+    | ir == Prn = let tos = mem!!sp in output (show tos)
+    | ir == Nln = output "\n"
+postExecIO _ _ = return ()
+
+handleDead :: SMState -> (String -> IO ()) -> IO()
+handleDead st@(SMState _ Finished _ _ _ _ _) _ = return ()
+handleDead st output = output (show st ++ "\n")
+
+push :: Int -> SMState -> Either SMState SMState
+push val (SMState ir ps pc bp sp codelen mem) = Right (SMState ir ps pc bp (sp-1) codelen (setMem (sp-1,val) mem))
+
+pop :: SMState -> (Int, SMState)
+pop (SMState ir ps pc bp sp codelen mem) = let val = mem!!sp in (val, SMState ir ps pc bp (sp+1) codelen mem)
+
+incPC :: SMState -> Either SMState SMState
+incPC (SMState ir ps pc bp sp codelen mem) = Right (SMState ir ps (pc+1) bp sp codelen mem)
+
+setPC :: Int -> SMState -> Either SMState SMState
+setPC newPC (SMState ir ps pc bp sp codelen mem) = Right (SMState ir ps newPC bp sp codelen mem)
+
+decSP :: Int -> SMState -> Either SMState SMState
+decSP dec (SMState ir ps pc bp sp codelen mem) = Right (SMState ir ps pc bp (sp-dec) codelen mem)
+
+inbounds :: Int -> SMState -> Either SMState SMState
+inbounds p st@(SMState ir ps pc bp sp codelen mem)
+    | p < length mem && p >= codelen = Right st
+    | otherwise = Left (SMState ir Badmem pc bp sp codelen mem)
+
+nonZero :: Int -> SMState -> Either SMState SMState
+nonZero n st@(SMState ir ps pc bp sp codelen mem)
+    | n /= 0 = Right st
+    | otherwise = Left (SMState ir Divzero pc bp sp codelen mem)
+
+validIdx :: Int -> Int -> SMState -> Either SMState SMState
+validIdx idx size st@(SMState ir ps pc bp sp codelen mem)
+    | idx `elem` [0..size-1] = Right st
+    | otherwise = Left (SMState ir Badind pc bp sp codelen mem)
 
 setMem :: (Int, Int) -> [Int] -> [Int]
 setMem (i,v) mem = take i mem ++ [v] ++ drop (i+1) mem
 
-trace :: State -> IO ()
-trace (State ps pc bp sp codelen mem) = do
-    putStr "\nDEBUG"
-    putStr $ " pc: "++(show pc)++" bp: "++(show bp)++"  sp: "++(show sp)++" tos: "
-    if (sp < length mem) then (putStrLn $ show (mem!!sp)) else putStrLn "????"
+alterMem :: (Int, Int) -> SMState -> Either SMState SMState
+alterMem (pos, val) st@(SMState ir ps pc bp sp codelen mem) = return (SMState ir ps pc bp sp codelen (setMem (pos,val) mem))
 
-printMem :: Int -> [Int] -> IO ()
-printMem codelen mem = do
-    putStr $ replicate 8 ' '
-    putStr " | "
-    mapM_ (\n -> putStr $ replicate 4 ' ' ++ ['0'] ++ (if(n < 10) then show n else [toEnum ((n `mod` 10)+65)])) [0..15]
-    putStr "\n"
-    putStr $ replicate (16*6+11) '-'
-    foldM_ (\(i,instrParam) n -> 
+execPrs :: Int -> [Int] -> String
+execPrs add mem
+    | mem!!add /= 0 = (toEnum $ mem!!add :: Char):(execPrs (add-1) mem)
+    | otherwise = []
+
+trace :: Either SMState SMState -> (String -> IO()) -> IO ()
+trace (Right (SMState ir ps pc bp sp codelen mem)) output = do
+    output "\nDEBUG"
+    output $ " ir: "++(show ir)++" pc: "++(show pc)++" bp: "++(show bp)++" sp: "++(show sp)++" tos: "
+    if (sp < length mem) then (output $ show (mem!!sp)) else output "????"
+    output "\n"
+trace (Left (SMState ir ps pc bp sp codelen mem)) output = do
+    output "\nDEBUG"
+    output $ " ir: "++(show ir)++" pc: "++(show pc)++" bp: "++(show bp)++" sp: "++(show sp)++" tos: "
+    if (sp < length mem) then (output $ show (mem!!sp)) else output "????"
+    output "\n"
+
+printMem :: Int -> [Int] -> (String -> IO ()) -> IO ()
+printMem codelen mem output = do
+    output $ replicate 8 ' '
+    output " | "
+    mapM_ (\n -> output $ replicate 4 ' ' ++ ['0'] ++ (if(n < 10) then show n else [toEnum ((n `mod` 10)+65)])) [0..15]
+    output "\n"
+    output $ replicate (16*6+11) '-'
+    foldM_ (\(i,instrParam) n ->
         let sym = (
                 if (not instrParam)
-                    && i < codelen 
+                    && i < codelen
                     && n `elem` map fromEnum ([minBound..maxBound] :: [Opcode])
-                then show (toEnum n :: Opcode) 
+                then show (toEnum n :: Opcode)
                 else show n
                 )
-            padding = 6 in do 
-                    when (i `mod` 16 == 0) $ (do 
-                        putStr "\n" 
-                        putStr $ (replicate 2 ' ') 
-                               ++ ['0'] 
-                               ++ (let i' = (i `div` (16^2)) in (if i' < 10 then show i' else [toEnum $ (i' `mod` 10) + 65]))
-                        putStr $ (replicate 2 ' ') 
-                               ++ (let i' = (i `div` 16) `mod` 16 in (if i' < 10 then show i' else [toEnum $ (i' `mod` 10) + 65])) 
+            padding = 6 in do
+                    when (i `mod` 16 == 0) $ (do
+                        output "\n"
+                        output $ (replicate 2 ' ')
                                ++ ['0']
-                        putStr " | " 
+                               ++ (let i' = (i `div` (16^2)) in (if i' < 10 then show i' else [toEnum $ (i' `mod` 10) + 65]))
+                        output $ (replicate 2 ' ')
+                               ++ (let i' = (i `div` 16) `mod` 16 in (if i' < 10 then show i' else [toEnum $ (i' `mod` 10) + 65]))
+                               ++ ['0']
+                        output " | "
                         )
-                    putStr $ (replicate (padding-(length sym)) ' ')++sym 
+                    output $ (replicate (padding-(length sym)) ' ')++sym
                     return (i+1,
-                        if ((not instrParam) 
-                            && i < codelen 
+                        if ((not instrParam)
+                            && i < codelen
                             && n `elem` map fromEnum ([minBound..maxBound] :: [Opcode])
                             && (toEnum n) `elem` [Adr,Dsp,Lit,Prs]
-                           ) 
-                        then True 
-                        else False 
+                           )
+                        then True
+                        else False
                         )) (0,False) mem
 
 
-stackdump :: State -> IO ()
-stackdump (State ps pc bp sp codelen mem) = do
-    putStr "\n\n"
-    putStr $ (replicate 20 '*') ++ (replicate 10 ' ') ++ "Stack Dump at: " ++ show pc ++ (replicate 10 ' ') ++ (replicate 20 '*')
-    putStr "\n\n"
-    putStr $ replicate 5 ' '
-    putStr $ "ps: "++(show ps)++"  "
-    putStr $ "pc: "++(show pc)++"  "
-    putStr $ "bp: "++(show bp)++"  "
-    putStr $ "sp: "++(show sp)++"  "
-    putStr "\n\n"
-    printMem codelen mem
-    putStr "\n"
+stackdump :: SMState -> (String -> IO()) -> IO ()
+stackdump (SMState ir ps pc bp sp codelen mem) output = do
+    output "\n\n"
+    output $ (replicate 20 '*') ++ (replicate 10 ' ') ++ "Stack Dump at: " ++ show pc ++ (replicate 10 ' ') ++ (replicate 20 '*')
+    output "\n\n"
+    output $ replicate 5 ' '
+    output $ "ir: "++(show ir)++"  "
+    output $ "ps: "++(show ps)++"  "
+    output $ "pc: "++(show pc)++"  "
+    output $ "bp: "++(show bp)++"  "
+    output $ "sp: "++(show sp)++"  "
+    output "\n\n"
+    printMem codelen mem output
+    output "\n"

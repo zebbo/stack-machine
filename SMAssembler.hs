@@ -1,23 +1,69 @@
-import StackMachine3
+import Control.Monad.State
+import System.IO
 
-memSize = 512
-code = [fromEnum Stk, fromEnum Dsp, 2, fromEnum Adr, -1, fromEnum Lit, 8, fromEnum Sto, fromEnum Stk, fromEnum Prs, 510, fromEnum Adr, -2, fromEnum Val, fromEnum Prn, fromEnum Hlt]
-variables = [3,0]
-literals = [0,32,61,32,89,0]
---initMem = code ++ (replicate (memSize-(length code + length variables + length literals)) 0) ++ variables ++ literals
-initMem1 = initMem memSize code variables literals
-prog = initState 0 (memSize-(length literals)) (length code) initMem1 -- pc bp codelen mem
+import StackMachine
 
+data AssState = Init | Label | SingleByteOp | MultiByteIntOp | MultiByteStringOp | Address | Literal | Comment | Invalid deriving (Show)
 
-code2 = [fromEnum Dsp, 2, fromEnum Adr, -2, fromEnum Lit, 0, fromEnum Sto, fromEnum Adr, -1, fromEnum Inn, fromEnum Adr, -2, fromEnum Adr, -1, fromEnum Val, fromEnum Adr, -2, fromEnum Val, fromEnum Add, fromEnum Sto, fromEnum Adr, -1, fromEnum Val, fromEnum Lit, 0, fromEnum Eql, fromEnum Bze, 7, fromEnum Prs, 510, fromEnum Adr, -2, fromEnum Val, fromEnum Prn, fromEnum Nln, fromEnum Hlt]
-variables2 = [0,0]
-literals2 = [0]++(reverse $ map fromEnum "Total is: ")++[0]
-initMem2 = initMem memSize code2 variables2 literals2
-prog2 = initState 0 (memSize-(length literals2)) (length code2) initMem2 -- pc bp codelen mem
+type Code = [Int]
+type Literals = [Int]
 
-main = do
-    emulate prog2 getLine putStr False
+-- returns codelen, base pointer, mem 
+assembleAndLoadFile :: String -> IO (Int,Int,[Int])
+assembleAndLoadFile fn = do
+    hdl <- openFile fn ReadMode
+    sourceCode <- hGetContents hdl
+    let (c,l) = assemble sourceCode
+        codelen = length c
+        bp = memSize - length l
+    return (codelen, bp, c ++ replicate (memSize - codelen - (length l)) 0 ++ l)
 
-initMem :: Int -> [Int] -> [Int] -> [Int] -> [Int]
-initMem memSize code variables literals = code ++ (replicate (memSize-(length code + length variables + length literals)) 0) ++ variables ++ literals
+assemble :: String -> (Code,Literals)
+assemble = foldl (\(cagg,lagg) x -> let (c,l) = fst $ runState (foldM assembleLine ([],lagg) $ words x) Init in 
+    (cagg++(reverse $ c), l)) ([],[0]) . lines
 
+assembleLine :: (Code,Literals) -> String -> State AssState (Code,Literals)
+assembleLine (c,l) word = state $ \s -> transition (c,l) word s
+
+transition :: (Code,Literals) -> String -> AssState -> ((Code,Literals), AssState)
+
+transition (c,l) word Init = case reads word :: [(Int,String)] of 
+     [(_,"")] -> ((c,l),Label)
+     _ -> if word == ";" 
+        then ((c,l),Comment) 
+        else ((c,l),Invalid)
+
+transition (c,l) word Label = case reads word :: [(Opcode,String)] of 
+    [(oc,"")] -> let ocNum = fromEnum oc in
+        if oc == Prs 
+        then ((ocNum:c,l),MultiByteStringOp)
+        else
+            if oc `elem` multiByteInstructions 
+            then ((ocNum:c,l),MultiByteIntOp)
+            else ((ocNum:c,l),SingleByteOp)
+    _ -> ((c,l),Invalid)
+
+transition (c,l) word SingleByteOp
+    | word == ";" = ((c,l),Comment)
+    | otherwise = ((c,l),Invalid)
+
+transition (c,l) word MultiByteIntOp = case reads word of 
+    [(n,"")] -> ((n:c,l),Address)
+    _ -> ((c,l),Invalid)
+
+transition (c,l) word Address
+    | word == ";" = ((c,l),Comment)
+    | otherwise = ((c,l),Invalid)
+
+transition (c,l) (w:xw) MultiByteStringOp
+    | w == '\'' = transition ((memSize - 1 - length l):c,l) xw Literal
+    | otherwise = ((c,l),Invalid)
+
+transition (c,l) word Literal = let rw = reverse word in
+    case rw of
+        ('\''):xw -> ((c, 0:(map fromEnum xw)++l),Comment)
+        _ -> ((c, (fromEnum ' '):(map fromEnum rw)++l),Literal)
+
+transition (c,l) _ Comment = ((c,l),Comment)
+
+transition (c,l) _ Invalid = ((c,l), Invalid)
