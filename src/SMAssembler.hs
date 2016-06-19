@@ -1,4 +1,5 @@
 import Control.Monad.State
+import System.Environment
 import System.IO
 
 import StackMachine
@@ -7,6 +8,11 @@ data AssState = Init | Label | SingleByteOp | MultiByteIntOp | MultiByteStringOp
 
 type Code = [Int]
 type Literals = [Int]
+
+main = do
+    [fn] <- getArgs
+    (codelen,bp,initmem) <- assembleAndLoadFile fn
+    emulate (initState 0 bp codelen initmem) getLine putStr False
 
 -- returns codelen, base pointer, mem 
 assembleAndLoadFile :: String -> IO (Int,Int,[Int])
