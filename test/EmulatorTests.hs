@@ -1,7 +1,7 @@
 import System.Exit
 import Test.HUnit
 
-import Emulator
+import StackMachine.Emulator
 
 main = do
     Counts _ _ errors failures <- runTestTT tests
