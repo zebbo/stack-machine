@@ -1,4 +1,4 @@
-module StackMachine
+module StackMachine.Emulator
 ( Opcode (..)
 , multiByteInstructions
 , memSize

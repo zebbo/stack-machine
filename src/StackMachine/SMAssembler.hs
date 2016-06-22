@@ -1,18 +1,24 @@
+{-# LANGUAGE PatternGuards #-}
+
+module StackMachine.SMAssembler 
+(
+  assembleAndLoadFile
+) where 
+
 import Control.Monad.State
-import System.Environment
 import System.IO
 
-import StackMachine
+import StackMachine.Emulator
 
 data AssState = Init | Label | SingleByteOp | MultiByteIntOp | MultiByteStringOp | Address | Literal | Comment | Invalid deriving (Show)
 
 type Code = [Int]
 type Literals = [Int]
 
-main = do
-    [fn] <- getArgs
-    (codelen,bp,initmem) <- assembleAndLoadFile fn
-    emulate (initState 0 bp codelen initmem) getLine putStr False
+--main = do
+--    [fn] <- getArgs
+--    (codelen,bp,initmem) <- assembleAndLoadFile fn
+--    emulate (initState 0 bp codelen initmem) getLine putStr False
 
 -- returns codelen, base pointer, mem 
 assembleAndLoadFile :: String -> IO (Int,Int,[Int])
@@ -33,29 +39,26 @@ assembleLine (c,l) word = state $ \s -> transition (c,l) word s
 
 transition :: (Code,Literals) -> String -> AssState -> ((Code,Literals), AssState)
 
-transition (c,l) word Init = case reads word :: [(Int,String)] of 
-     [(_,"")] -> ((c,l),Label)
-     _ -> if word == ";" 
-        then ((c,l),Comment) 
-        else ((c,l),Invalid)
+transition (c,l) word Init 
+    | [(_,"")] <- tryRead word = ((c,l),Label)
+    | word == ";" = ((c,l),Comment)
+    | otherwise = ((c,l),Invalid)
+    where tryRead w = reads w :: [(Int,String)]
 
-transition (c,l) word Label = case reads word :: [(Opcode,String)] of 
-    [(oc,"")] -> let ocNum = fromEnum oc in
-        if oc == Prs 
-        then ((ocNum:c,l),MultiByteStringOp)
-        else
-            if oc `elem` multiByteInstructions 
-            then ((ocNum:c,l),MultiByteIntOp)
-            else ((ocNum:c,l),SingleByteOp)
-    _ -> ((c,l),Invalid)
+transition (c,l) word Label 
+    | [(Prs,"")] <- tryRead word = (((fromEnum Prs):c,l),MultiByteStringOp)
+    | [(oc,"")] <- tryRead word = let ocNum = fromEnum oc in 
+        if oc `elem` multiByteInstructions then ((ocNum:c,l),MultiByteIntOp) else ((ocNum:c,l),SingleByteOp)
+    | otherwise = ((c,l),Invalid)
+    where tryRead w = reads w :: [(Opcode,String)]
 
 transition (c,l) word SingleByteOp
     | word == ";" = ((c,l),Comment)
     | otherwise = ((c,l),Invalid)
 
-transition (c,l) word MultiByteIntOp = case reads word of 
-    [(n,"")] -> ((n:c,l),Address)
-    _ -> ((c,l),Invalid)
+transition (c,l) word MultiByteIntOp 
+    | [(n,"")] <- reads word = ((n:c,l),Address)
+    | otherwise = ((c,l),Invalid)
 
 transition (c,l) word Address
     | word == ";" = ((c,l),Comment)
@@ -65,10 +68,10 @@ transition (c,l) (w:xw) MultiByteStringOp
     | w == '\'' = transition ((memSize - 1 - length l):c,l) xw Literal
     | otherwise = ((c,l),Invalid)
 
-transition (c,l) word Literal = let rw = reverse word in
-    case rw of
-        ('\''):xw -> ((c, 0:(map fromEnum xw)++l),Comment)
-        _ -> ((c, (fromEnum ' '):(map fromEnum rw)++l),Literal)
+transition (c,l) word Literal 
+    | ('\''):xw <- rw = ((c, 0:(map fromEnum xw)++l),Comment)
+    | otherwise = ((c, (fromEnum ' '):(map fromEnum rw)++l),Literal)
+    where rw = reverse word
 
 transition (c,l) _ Comment = ((c,l),Comment)
 
