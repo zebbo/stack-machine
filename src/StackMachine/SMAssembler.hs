@@ -9,11 +9,12 @@ module StackMachine.SMAssembler
 )   where 
 
 import Control.Monad.State
+import Data.Char (isSpace)
 import System.IO
 
 import StackMachine.Emulator
 
-data AssState = Init | Label | SingleByteOp | MultiByteIntOp | MultiByteStringOp | Address | Literal | Comment | Invalid deriving (Show)
+data AssState = Init | Label | SingleByteOp | MultiByteIntOp | MultiByteStringOp | Address | Comment | Invalid deriving (Show)
 
 type Code = [Int]
 type Literals = [Int]
@@ -29,7 +30,7 @@ assembleAndLoadFile fn = do
     return (codelen, bp, c ++ replicate (memSize - codelen - (length l)) 0 ++ l)
 
 assemble :: String -> (Code,Literals)
-assemble = foldl (\(cagg,lagg) x -> let (c,l) = fst $ runState (foldM assembleLine ([],lagg) $ words x) Init in 
+assemble = foldl (\(cagg,lagg) x -> let (c,l) = fst $ runState (foldM assembleLine ([],lagg) $ tokenize x) Init in 
     (cagg++(reverse $ c), l)) ([],[0]) . lines
 
 assembleLine :: (Code,Literals) -> String -> State AssState (Code,Literals)
@@ -62,15 +63,19 @@ transition (c,l) word Address
     | word == ";" = ((c,l),Comment)
     | otherwise = ((c,l),Invalid)
 
-transition (c,l) (w:xw) MultiByteStringOp
-    | w == '\'' = transition ((memSize - 1 - length l):c,l) xw Literal
+transition (c,l) word MultiByteStringOp
+    | not $ null word = (((memSize - 1 - length l):c, 0:(map fromEnum rw)++l),Comment)
     | otherwise = ((c,l),Invalid)
-
-transition (c,l) word Literal 
-    | ('\''):xw <- rw = ((c, 0:(map fromEnum xw)++l),Comment)
-    | otherwise = ((c, (fromEnum ' '):(map fromEnum rw)++l),Literal)
     where rw = reverse word
 
 transition (c,l) _ Comment = ((c,l),Comment)
 
 transition (c,l) _ Invalid = ((c,l), Invalid)
+
+tokenize :: String -> [String]
+tokenize s = case dropWhile isSpace s of
+                "" -> []
+                ('\'':s') -> w : tokenize s''
+                    where (w, ('\'':s'')) = break (=='\'') s'
+                s' -> w : tokenize s''
+                    where (w, s'') = break isSpace s'
